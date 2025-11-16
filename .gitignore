@@ -1,0 +1,21 @@
+# Node modules (dependencies)
+node_modules/
+
+# Environment variables
+.env
+
+# Firebase service key (VERY SENSITIVE)
+firebase-key.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Replit or IDE files (optional)
+.replit
+.vscode/
+.idea/
