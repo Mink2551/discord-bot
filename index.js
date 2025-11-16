@@ -1,5 +1,6 @@
 const admin = require("firebase-admin");
 const { Client, GatewayIntentBits } = require("discord.js");
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
 require("dotenv").config();
 
 const client = new Client({
@@ -9,8 +10,6 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
   ],
 });
-
-const pendingCategoryCreate = new Map();
 
 // -----------------------------
 // Initialize Firebase via ENV
@@ -32,13 +31,110 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-// -----------------------------
-// Single message listener
-// -----------------------------
+// store temp category creation session
+const pendingCategoryCreate = new Map();
+
+// store active vocab "play" sessions
+const activeGames = new Map();
+
+
+// -----------------------------------------------------
+// BUTTON HANDLER FOR GAME
+// -----------------------------------------------------
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isButton()) return;
+
+  const userId = interaction.user.id;
+  const session = activeGames.get(userId);
+  if (!session)
+    return interaction.reply({
+      content: "❌ No game running.",
+      ephemeral: true,
+    });
+
+  const id = interaction.customId;
+
+  if (id === "learning") session.stats.learning++;
+  if (id === "remember") session.stats.remember++;
+  if (id === "meaning") session.stats.meaning++;
+
+  session.index++;
+
+  if (session.index >= session.vocabList.length) {
+    activeGames.delete(userId);
+
+    return interaction.update({
+      content:
+`🏁 **Game Finished!**
+📘 **Category:** ${session.vocabList[0].category || "Unknown"}
+
+**Analysis**
+--------------------------------
+🔵 Still Learning: **${session.stats.learning}**
+🟢 Remember: **${session.stats.remember}**
+🟡 Show Meaning: **${session.stats.meaning}**
+--------------------------------
+Total words: **${session.vocabList.length}**`,
+      components: [],
+    });
+  }
+
+  return sendGameCard(interaction, session, true);
+});
+
+
+// -----------------------------------------------------
+// SEND GAME CARD FUNCTION
+// -----------------------------------------------------
+async function sendGameCard(target, session, edit = false) {
+  const item = session.vocabList[session.index];
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("learning")
+      .setLabel("Still Learning")
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId("remember")
+      .setLabel("Remember")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId("meaning")
+      .setLabel("Show Meaning")
+      .setStyle(ButtonStyle.Primary)
+  );
+
+  const content =
+`📘 **Word ${session.index + 1}/${session.vocabList.length}**
+-------------------------------------
+**${item.vocab}**
+(What is the meaning?)
+-------------------------------------`;
+
+  if (edit) return target.update({ content, components: [row] });
+  return target.reply({ content, components: [row] });
+}
+
+
+// -----------------------------------------------------
+// SHUFFLE
+// -----------------------------------------------------
+function shuffleArray(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+}
+
+
+// -----------------------------------------------------
+// MESSAGE COMMAND HANDLER
+// -----------------------------------------------------
 client.on("messageCreate", async (msg) => {
   if (msg.author.bot) return;
 
   const content = msg.content.trim();
+
 
   // -----------------------------
   // Test Firebase
@@ -48,8 +144,9 @@ client.on("messageCreate", async (msg) => {
     return msg.reply("✅ Written to Firestore successfully!");
   }
 
+
   // -----------------------------
-  // Help Command
+  // Help
   // -----------------------------
   if (content === "!help") {
     return msg.reply(
@@ -64,188 +161,259 @@ client.on("messageCreate", async (msg) => {
 **Delete whole category**
 \`!delete category <category>\`
 
-**List all categories**
+**List categories**
 \`!list categories\`
 
 **List all vocab in category**
 \`!list vocab <category>\`
 
-**Edit vocab meaning**
+**Edit vocab**
 \`!edit vocab <category> <word> <newMeaning>\`
 
-**Show help**
-\`!help\`
+**Play game**
+\`!play <category>\`
 
-**Show link**
+**Show web link**
 \`!link\`
 -------------------------------------`
     );
   }
 
-  // -----------------------------
-  // Link Command
-  // -----------------------------
-  if (content === "!link") {
-    return msg.reply(
-`**📘 Link to website**
--------------------------------------
-https://vocab-cards-eight.vercel.app/
--------------------------------------`
-    );
-  }
 
   // -----------------------------
-  // Handle pending category creation
+  // Link to website
+  // -----------------------------
+  if (content === "!link") {
+    return msg.reply(`https://vocab-cards-eight.vercel.app/`);
+  }
+
+
+  // -----------------------------
+  // Handle pending YES/NO for category creation
   // -----------------------------
   const pending = pendingCategoryCreate.get(msg.author.id);
   if (pending) {
     const reply = content.toLowerCase();
+
     if (reply === "no") {
       pendingCategoryCreate.delete(msg.author.id);
       return msg.reply("❌ Cancelled.");
     }
+
     if (reply === "yes") {
       await db.collection("vocab").doc(pending.category).set({
         createdAt: Date.now(),
         totalVocab: 0,
       });
       msg.reply(`✅ Category **${pending.category}** created! Adding vocab now...`);
+
       await addVocabToCategory(msg, pending.category, pending.vocabPairs);
       pendingCategoryCreate.delete(msg.author.id);
       return;
     }
+
     return;
   }
+
 
   // -----------------------------
   // ADD VOCAB
   // -----------------------------
   if (content.startsWith("!add vocab")) {
     const parts = content.split(/\s+/);
-    if (parts.length < 4) return msg.reply("❌ Use: `!add vocab <category> <vocab:meaning>`");
+    if (parts.length < 4)
+      return msg.reply("❌ Use: `!add vocab <category> <vocab:meaning>`");
 
     const category = parts[2];
     const vocabPairs = parts.slice(3);
+
     const categoryRef = db.collection("vocab").doc(category);
     const categoryDoc = await categoryRef.get();
 
     if (!categoryDoc.exists) {
       pendingCategoryCreate.set(msg.author.id, { category, vocabPairs });
       return msg.reply(
-        `⚠️ Category **${category}** does not exist.\nDo you want to create it? Type: **yes** or **no**`
+        `⚠️ Category **${category}** does not exist.\nType **yes** to create or **no** to cancel.`
       );
     }
 
     return addVocabToCategory(msg, category, vocabPairs);
   }
 
+
   // -----------------------------
   // DELETE VOCAB
   // -----------------------------
   if (content.startsWith("!delete vocab")) {
     const parts = content.split(/\s+/);
-    if (parts.length < 4) return msg.reply("❌ Use: `!delete vocab <category> <vocab>`");
+    if (parts.length < 4)
+      return msg.reply("❌ Use: `!delete vocab <category> <word>`");
 
     const category = parts[2];
     const vocab = parts[3];
+
     const ref = db.collection("vocab").doc(category).collection("vocab");
     const snapshot = await ref.where("vocab", "==", vocab).get();
-    if (snapshot.empty) return msg.reply(`❌ Vocab **${vocab}** not found in category **${category}**.`);
+
+    if (snapshot.empty)
+      return msg.reply(`❌ Vocab **${vocab}** not found in **${category}**.`);
 
     snapshot.forEach((d) => d.ref.delete());
-    return msg.reply(`🗑️ Deleted vocab **${vocab}** from category **${category}**.`);
+    return msg.reply(`🗑️ Deleted **${vocab}** from **${category}**.`);
   }
+
 
   // -----------------------------
   // DELETE CATEGORY
   // -----------------------------
   if (content.startsWith("!delete category")) {
     const parts = content.split(/\s+/);
-    if (parts.length < 3) return msg.reply("❌ Use: `!delete category <category>`");
+    if (parts.length < 3)
+      return msg.reply("❌ Use: `!delete category <category>`");
 
     const category = parts[2];
     const catRef = db.collection("vocab").doc(category);
     const catDoc = await catRef.get();
-    if (!catDoc.exists) return msg.reply(`❌ Category **${category}** does not exist.`);
+
+    if (!catDoc.exists)
+      return msg.reply(`❌ Category **${category}** does not exist.`);
 
     const vocabSnap = await catRef.collection("vocab").get();
     vocabSnap.forEach((d) => d.ref.delete());
     await catRef.delete();
-    return msg.reply(`🗑️ Category **${category}** and all its vocabulary deleted.`);
+
+    return msg.reply(`🗑️ Category **${category}** deleted.`);
   }
+
 
   // -----------------------------
   // LIST CATEGORIES
   // -----------------------------
   if (content === "!list categories") {
     const snapshot = await db.collection("vocab").get();
-    if (snapshot.empty) return msg.reply("⚠️ No categories found.");
+
+    if (snapshot.empty)
+      return msg.reply("⚠️ No categories found.");
+
     const categories = snapshot.docs.map((doc) => doc.id).join(", ");
     return msg.reply(`📚 Categories:\n${categories}`);
   }
 
+
   // -----------------------------
-  // LIST VOCAB IN CATEGORY
+  // LIST VOCAB
   // -----------------------------
   if (content.startsWith("!list vocab")) {
     const parts = content.split(/\s+/);
-    if (parts.length < 3) return msg.reply("❌ Use: `!list vocab <category>`");
+    if (parts.length < 3)
+      return msg.reply("❌ Use: `!list vocab <category>`");
 
     const category = parts[2];
+
     const ref = db.collection("vocab").doc(category).collection("vocab");
     const snapshot = await ref.get();
-    if (snapshot.empty) return msg.reply(`⚠️ No vocab found in category **${category}**.`);
 
-    let response = `📘 Vocabulary in **${category}**:\n`;
-    snapshot.docs.forEach((doc) => {
-      const data = doc.data();
-      response += `• ${data.vocab} → ${data.meaning}\n`;
+    if (snapshot.empty)
+      return msg.reply(`⚠️ No vocab in **${category}**.`);
+
+    let out = `📘 Vocabulary in **${category}**:\n`;
+    snapshot.forEach((doc) => {
+      const d = doc.data();
+      out += `• ${d.vocab} → ${d.meaning}\n`;
     });
-    return msg.reply(response);
+
+    return msg.reply(out);
   }
+
 
   // -----------------------------
   // EDIT VOCAB
   // -----------------------------
   if (content.startsWith("!edit vocab")) {
     const parts = content.split(/\s+/);
-    if (parts.length < 5) return msg.reply("❌ Use: `!edit vocab <category> <word> <newMeaning>`");
+    if (parts.length < 5)
+      return msg.reply("❌ Use: `!edit vocab <category> <word> <newMeaning>`");
 
     const category = parts[2];
     const vocab = parts[3];
-    const newMeaning = parts.slice(4).join(" "); // supports multi-word meaning
+    const newMeaning = parts.slice(4).join(" ");
 
     const ref = db.collection("vocab").doc(category).collection("vocab");
     const snapshot = await ref.where("vocab", "==", vocab).get();
-    if (snapshot.empty) return msg.reply(`❌ Vocab **${vocab}** not found in category **${category}**.`);
+
+    if (snapshot.empty)
+      return msg.reply(`❌ Vocab **${vocab}** not found.`);
 
     snapshot.forEach((d) => d.ref.update({ meaning: newMeaning }));
-    return msg.reply(`✏️ Updated **${vocab}** in **${category}** → ${newMeaning}`);
+    return msg.reply(`✏️ Updated **${vocab}** → ${newMeaning}`);
   }
+
+
+  // -----------------------------
+  // PLAY GAME
+  // -----------------------------
+  if (content.startsWith("!play")) {
+    const parts = content.split(/\s+/);
+    if (parts.length < 2)
+      return msg.reply("❌ Use: `!play <category>`");
+
+    const category = parts[1];
+
+    const ref = db.collection("vocab").doc(category).collection("vocab");
+    const snapshot = await ref.get();
+
+    if (snapshot.empty)
+      return msg.reply(`⚠️ No vocab found in **${category}**.`);
+
+    const vocabList = snapshot.docs.map((d) => d.data());
+    shuffleArray(vocabList);
+
+    const session = {
+      index: 0,
+      vocabList,
+      stats: { learning: 0, remember: 0, meaning: 0 },
+      userId: msg.author.id,
+    };
+
+    activeGames.set(msg.author.id, session);
+
+    return sendGameCard(msg, session);
+  }
+
 });
 
-// -----------------------------
-// Add vocab helper function
-// -----------------------------
+
+// -----------------------------------------------------
+// VOCAB ADD HELPER
+// -----------------------------------------------------
 async function addVocabToCategory(msg, category, vocabPairs) {
   const ref = db.collection("vocab").doc(category).collection("vocab");
-  let success = 0, fail = 0;
+
+  let success = 0;
+  let fail = 0;
 
   for (const pair of vocabPairs) {
     const [word, meaning] = pair.split(":");
-    if (!word || !meaning) { fail++; continue; }
+    if (!word || !meaning) {
+      fail++;
+      continue;
+    }
 
     await ref.add({
       vocab: word,
       meaning: meaning,
       timestamp: Date.now(),
+      category,
     });
+
     success++;
   }
 
   return msg.reply(
-    `📘 **Category:** ${category}\n➕ Success: **${success}**\n❌ Failed: **${fail}**`
+    `📘 **Category:** ${category}\n➕ Added: **${success}**\n❌ Failed: **${fail}**`
   );
 }
 
+
+// -----------------------------------------------------
 client.login(process.env.DISCORD_TOKEN);
