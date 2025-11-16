@@ -47,22 +47,34 @@ client.on("interactionCreate", async (interaction) => {
   const userId = interaction.user.id;
   const session = activeGames.get(userId);
   if (!session)
-    return interaction.reply({
-      content: "❌ No game running.",
-      ephemeral: true,
-    });
+    return interaction.reply({ content: "❌ No game running.", ephemeral: true });
 
   const id = interaction.customId;
+  const item = session.vocabList[session.index];
 
+  // --- SHOW MEANING AS TOGGLE ---
+  if (id === "meaning") {
+    // toggle meaning in same message
+    return interaction.update({
+      content:
+`📘 **Word ${session.index + 1}/${session.vocabList.length}**
+-------------------------------------
+**${item.vocab}**
+**Meaning:** ${item.meaning}
+-------------------------------------`,
+      components: interaction.message.components, // keep buttons
+    });
+  }
+
+  // --- RECORD USER CHOICE ---
   if (id === "learning") session.stats.learning++;
   if (id === "remember") session.stats.remember++;
-  if (id === "meaning") session.stats.meaning++;
 
   session.index++;
 
+  // --- GAME FINISHED ---
   if (session.index >= session.vocabList.length) {
     activeGames.delete(userId);
-
     return interaction.update({
       content:
 `🏁 **Game Finished!**
@@ -72,13 +84,13 @@ client.on("interactionCreate", async (interaction) => {
 --------------------------------
 🔵 Still Learning: **${session.stats.learning}**
 🟢 Remember: **${session.stats.remember}**
-🟡 Show Meaning: **${session.stats.meaning}**
 --------------------------------
 Total words: **${session.vocabList.length}**`,
-      components: [],
+      components: []
     });
   }
 
+  // --- NEXT QUESTION ---
   return sendGameCard(interaction, session, true);
 });
 
